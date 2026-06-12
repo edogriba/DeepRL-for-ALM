@@ -1,0 +1,14 @@
+# Virtual environment folder
+.deeprl/
+__pycache__/
+.vscode/
+tmp_log/
+models/__pycache__/
+models/notebooks/saved_models/
+models/notebooks/tmp_log/
+models/opt_results/
+results/
+images-for-thesis/
+old_notebooks/
+.DS_Store
+test-diff
