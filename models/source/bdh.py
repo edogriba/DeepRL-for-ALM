@@ -58,7 +58,6 @@ class OCEUtilityExp(nn.Module):
         self.y = nn.Parameter(torch.tensor(0.0)) 
 
     def forward(self, X):
-        # [FIXED]: Proper mathematical stabilization using LogSumExp logic
         gains = X + self.y
         args = -self.gamma * gains
         max_arg = torch.max(args).detach() 
@@ -182,11 +181,8 @@ def batched_differentiable_rollout(
                     if 0 <= s < max_M:
                         future_cash_projection[:, m] += holdings[:, k, s] * (bond_nominal * coupons[:, k, s] / coupons_per_year_k)
 
-        norm_cash = cash / initial_cash
-        norm_future_cash = future_cash_projection.clone() / initial_cash
-        norm_liability = liability_due / initial_cash
         
-        state = build_state(norm_cash, norm_future_cash, betas_t, norm_liability)
+        state = build_state(cash, future_cash_projection, betas_t, liability_due)
         weights = model(t, state, prev_action)
 
         if log_scenario_idx is not None and log_scenario_idx < batch_size:
@@ -354,8 +350,8 @@ class HeuristicPolicyLogger(nn.Module):
         device = state.device
         
         if self.log_scenario_idx is not None and self.log_scenario_idx < batch_size:
-            cash_approx = state[self.log_scenario_idx, 0].item() * 100.0 
-            liab_approx = state[self.log_scenario_idx, -1].item() * 100.0
+            cash_approx = state[self.log_scenario_idx, 0].item() * 1000.0 
+            liab_approx = state[self.log_scenario_idx, -1].item() * 1000.0
             print(f"  [Step t={t}] | Initial Cash: ${cash_approx:.2f} | Liability Due: ${liab_approx:.2f}")
             print(f"             | Action Ordered (Weights): {self.fixed_weights.tolist()}")
             

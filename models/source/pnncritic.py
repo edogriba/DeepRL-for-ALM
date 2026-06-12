@@ -198,6 +198,7 @@ def batched_cmdp_rollout(
 
     log_probs_seq, penalties_seq, v_preds_seq, entropies_seq, is_alive_seq = [], [], [], [], []
     early_terminal_nav = torch.zeros(batch_size, 1, device=device)
+    ever_bankrupt = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
     for t in range(T):
         betas_t = yields_batch[:, t]
@@ -216,6 +217,7 @@ def batched_cmdp_rollout(
         # Insolvency check (hard-termination)
         projected_cash = cash + inflows - liabilities_batch[:, t]
         newly_bankrupt = (projected_cash < 0) & is_alive
+        ever_bankrupt = ever_bankrupt | newly_bankrupt.squeeze(-1)
 
         y_1m = get_nelson_siegel_yield_batched(1.0 / 12.0, betas_t)
         debt_interest = 1.0 + y_1m * (1.0 / 12.0)
@@ -280,10 +282,10 @@ def batched_cmdp_rollout(
                         future_cf[:, m] += holdings[:, k, s] * (bond_nominal * coupons[:, k, s] / cpn_rate)
 
         state = build_state(
-            cash / initial_cash,
-            future_cf / initial_cash,
+            cash,
+            future_cf,
             betas_t,
-            liabilities_batch[:, t].view(-1, 1) / initial_cash,
+            liabilities_batch[:, t].view(-1, 1),
         ).detach()
 
         v_pred_t = critic(t, state)
@@ -374,11 +376,13 @@ def batched_cmdp_rollout(
 
     terminal_value = terminal_value - pv_liabs_term
 
-    term_penalty = torch.where((terminal_value < 0) & is_alive,
+    terminal_insolvent = (terminal_value < 0) & is_alive
+    term_penalty = torch.where(terminal_insolvent,
                                torch.tensor(float(F), device=device),
                                torch.tensor(0.0, device=device))
     terminal_value = terminal_value - term_penalty
     penalties_seq[-1] = penalties_seq[-1] + term_penalty
+    ever_bankrupt = ever_bankrupt | terminal_insolvent.squeeze(-1)
 
     final_nav = torch.where(~is_alive, early_terminal_nav, terminal_value)
 
@@ -389,6 +393,7 @@ def batched_cmdp_rollout(
         "v_preds":      torch.cat(v_preds_seq, dim=1),
         "entropies":    torch.cat(entropies_seq, dim=1),
         "is_alive_seq": torch.cat(is_alive_seq, dim=1),
+        "ever_bankrupt":ever_bankrupt,
     }
 
 
@@ -559,6 +564,7 @@ def evaluate_cmdp_alm(actor: nn.Module, critic: nn.Module, markov_config: dict,
 
     true_nav = res["true_nav"].cpu().numpy()
     hard_penalties = res["penalties"].sum(dim=1).cpu().numpy()
+    ever_bankrupt = res["ever_bankrupt"].cpu().numpy()
 
     var_05 = np.percentile(true_nav, 5)
     cvar_05 = float(np.mean(true_nav[true_nav <= var_05]))
@@ -573,6 +579,7 @@ def evaluate_cmdp_alm(actor: nn.Module, critic: nn.Module, markov_config: dict,
         "cvar_05":        cvar_05,
         "mean_penalty":   float(np.mean(hard_penalties)),
         "violation_rate": float(np.mean(hard_penalties > 0.0)),
+        "default_rate":   float(np.mean(ever_bankrupt)),
     }
 
     print("\n=== Evaluation Results ===")
@@ -583,6 +590,7 @@ def evaluate_cmdp_alm(actor: nn.Module, critic: nn.Module, markov_config: dict,
     print(f"CVaR (5%):      {metrics['cvar_05']:.2f}")
     print(f"Mean Penalty:   {metrics['mean_penalty']:.4f}")
     print(f"Violation Rate: {metrics['violation_rate'] * 100:.4f}%")
+    print(f"Default Rate:   {metrics['default_rate'] * 100:.2f}%")
     print("==========================")
 
     actor.train()
@@ -607,7 +615,6 @@ def evaluate_pnncritic_agent(actor, markov_config, K, seed=0, verbose=False):
     bond_coupon_dates = [Bond(**cfg).coupon_dates for cfg in markov_config["bond_configs"]]
     max_M = max(bond_maturities)
     bond_nominal = 100.0  # stesso default dei rollout batched
-    W0 = float(markov_config["W0"])
 
     for t in range(markov_config["T"]):
         inflows = env._get_total_inflows()
@@ -632,12 +639,12 @@ def evaluate_pnncritic_agent(actor, markov_config, K, seed=0, verbose=False):
                         future_cf[m] += env.holdings[k, s] * (bond_nominal * env.coupons[k, s] / cpn_rate)
 
         future_cash_tensor = torch.tensor(
-            future_cf / W0, dtype=torch.float32, device=device
+            future_cf, dtype=torch.float32, device=device
         ).unsqueeze(0)
 
-        cash_tensor = torch.tensor([[projected_cash / W0]], dtype=torch.float32, device=device)
+        cash_tensor = torch.tensor([[projected_cash]], dtype=torch.float32, device=device)
         betas_tensor = torch.tensor(env.yield_params, dtype=torch.float32, device=device).unsqueeze(0)
-        liab_tensor = torch.tensor([[l_t / W0]], dtype=torch.float32, device=device)
+        liab_tensor = torch.tensor([[l_t]], dtype=torch.float32, device=device)
 
         state_tensor = build_state(cash_tensor, future_cash_tensor, betas_tensor, liab_tensor)
 
