@@ -7,7 +7,7 @@ from models.utils import calculate_pv, identity_utility, cara_utility, get_disco
 from environment.bond import Bond
 
 class DeepALMEnv(gym.Env):
-    def __init__(self,  markov_config=None, seed=None, verbose=False, use_dirichlet=False):
+    def __init__(self,  markov_config=None, seed=None, verbose=False, use_dirichlet=False, eval_band=False):
         """
         Args:
             bond_configs: List of dicts, e.g., 
@@ -26,6 +26,8 @@ class DeepALMEnv(gym.Env):
         self.T = markov_config["T"]
         self.scenario = None
         self.seed = seed
+        self._rng = np.random.default_rng(seed)
+        self._seed_lo, self._seed_hi = (10_000_000, 20_000_000) if eval_band else (0, 10_000_000)
         self.markov_config = markov_config
         self.use_dirichlet = use_dirichlet
         self.B1_0 = markov_config["B1_0"]
@@ -63,9 +65,9 @@ class DeepALMEnv(gym.Env):
         pv_a = calculate_pv(self.cash, asset_cfs, self.yield_params)
         
         # Calculate PV(Liabilities)
-        pv_l = calculate_pv(0, self.liabilities, self.yield_params)
-        if len(self.liabilities) > 1:
-            pv_l = calculate_pv(0, self.liabilities[1:], self.yield_params)
+        residual_liabs = self.scenario.liabilities[self.current_step + 1:].flatten()
+        if residual_liabs.size > 0:
+            pv_l = calculate_pv(0, residual_liabs, self.yield_params)
         else:
             pv_l = 0.0
             
@@ -79,8 +81,8 @@ class DeepALMEnv(gym.Env):
         if options is not None and "scenario" in options:
             self.scenario = options["scenario"]
         else:
-            episode_seed = self.seed if self.seed is not None else None
-            
+            episode_seed = int(self._rng.integers(self._seed_lo, self._seed_hi))
+                        
             safe_config = {k: self.markov_config[k] for k in ["i0_init", "i1_init", "BETA0_GRID", "BETA1_GRID", "BETA2", "P0", "P1"] if k in self.markov_config}
 
             yield_path = MarkovYieldCurveGenerator.generate(self.T * 2, seed=episode_seed, pure_grid=True, **safe_config)

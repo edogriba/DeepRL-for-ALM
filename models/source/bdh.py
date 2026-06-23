@@ -155,7 +155,7 @@ def batched_differentiable_rollout(
 
             pv_liabs = torch.zeros(batch_size, 1, device=device)
             L_total = liabilities_batch.shape[1]
-            for j in range(max_M - 1):
+            for j in range(L_total - (t + 1)):
                 idx = t + 1 + j
                 if idx >= L_total:
                     break
@@ -271,7 +271,7 @@ def batched_differentiable_rollout(
 
     pv_liabs_term = torch.zeros(batch_size, 1, device=device)
     L_total = liabilities_batch.shape[1]
-    for j in range(max_M - 1):
+    for j in range(L_total - (T + 1)):
         idx = T + 1 + j
         if idx >= L_total:
             break
@@ -525,7 +525,7 @@ def evaluate_deep_alm_dh(model, markov_config, eval_episodes=1000, device="cpu",
     print(f"CVaR ({conf_level}%):     {cvar:.2f} (Average of worst {alpha*100:.0f}%)")
     print(f"Min / Max NAV:  {metrics['min_nav']:.2f} / {metrics['max_nav']:.2f}")
     print(f"Entropic Risk:  {metrics['entropic_risk']:.4f}")
-    print(f"Default Rate:   {metrics['default_rate'] * 100:.2f}%")
+    print(f"Default Rate:   {metrics['default_rate'] * 100:.4f}%")
     print(f"Total Defaults: {len(bankrupt_indices)} out of {eval_episodes} episodes")
 
     return metrics, history_log, terminal_values

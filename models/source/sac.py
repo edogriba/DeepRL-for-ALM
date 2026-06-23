@@ -111,7 +111,7 @@ def evaluate_sac_alm(
     print(f"CVaR (5%):      {metrics['cvar_nav']:.2f}")
     print(f"Mean Penalty:   {metrics['mean_penalty']:.4f}")
     print(f"Violation Rate: {metrics['violation_rate'] * 100:.4f}%")
-    print(f"Default Rate:   {metrics['default_rate'] * 100:.2f}%")
+    print(f"Default Rate:   {metrics['default_rate'] * 100:.4f}%")
     print("==============================\n")
 
     return metrics, raw_results

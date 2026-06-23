@@ -58,7 +58,7 @@ N_SEEDS         = 3         # PNN tuner uses 10; 3 keeps SAC wall-clock manageab
                             # (the pruner stops bad configs after the first seed)
 SELECTION       = "mean"    # or "mean_minus_std" for a robustness-penalized objective
 EVAL_EPISODES   = 2000      # prima 2000 -> aligned with the PNN tuner
-EVAL_SEED       = 123       # common random numbers: same eval scenarios everywhere
+EVAL_SEED       = 1_000_000_000       # common random numbers: same eval scenarios everywhere
 CVAR_ALPHA      = 0.05      # tail fraction used by the CVaR metric
 BAD_SCORE       = -1e9      # finite sentinel for failed / non-finite seeds
 
@@ -70,7 +70,7 @@ VALID_METRICS = ("mean_nav", "cvar_05")
 # ===========================================================================
 # ENVIRONMENT SETUP FOR STABLE-BASELINES3
 # ===========================================================================
-def make_env(use_dirichlet_flag, seed=None):
+def make_env(use_dirichlet_flag, seed=None, eval_band=False):
     """
     Creates the vectorized environment by injecting the Dirichlet flag.
     This allows the environment to know whether it should apply Softmax
@@ -81,7 +81,8 @@ def make_env(use_dirichlet_flag, seed=None):
         lambda: Monitor(DeepALMEnv(
             markov_config=markov_config,
             seed=seed,
-            use_dirichlet=use_dirichlet_flag
+            use_dirichlet=False,
+            eval_band=eval_band
         ))
     ])
 
@@ -115,7 +116,7 @@ def run_one_seed(make_model, use_dirichlet, seed):
     model = make_model(env, seed)
     model.learn(total_timesteps=TOTAL_TIMESTEPS)
 
-    eval_env = make_env(use_dirichlet_flag=use_dirichlet, seed=EVAL_SEED)
+    eval_env = make_env(use_dirichlet_flag=use_dirichlet, seed=EVAL_SEED, eval_band=True)
     episode_rewards, _ = evaluate_policy(
         model,
         eval_env,
@@ -185,8 +186,7 @@ def multi_seed_objective(trial, make_model, use_dirichlet):
 def objective_ppo(trial):
     # Structural choice: Dirichlet vs Gaussian (sampled ONCE per trial,
     # shared by all seeds)
-    use_dirichlet = trial.suggest_categorical("use_dirichlet", [True, False])
-    policy_class = DirichletActorCriticPolicy if use_dirichlet else "MultiInputPolicy"
+    policy_class = "MultiInputPolicy"
 
     # PPO hyperparameter search space
     learning_rate = trial.suggest_categorical("learning_rate", [1e-5, 1e-4, 1e-3])
@@ -212,12 +212,13 @@ def objective_ppo(trial):
             verbose=0
         )
 
-    return multi_seed_objective(trial, make_model, use_dirichlet)
+    return multi_seed_objective(trial, make_model, False)
 
 
 def objective_a2c(trial):
     # Structural choice
-    use_dirichlet = trial.suggest_categorical("use_dirichlet", [True, False])
+    #use_dirichlet = trial.suggest_categorical("use_dirichlet", [True, False])
+    use_dirichlet = False
     policy_class = DirichletActorCriticPolicy if use_dirichlet else "MultiInputPolicy"
 
     # A2C hyperparameter search space
@@ -313,18 +314,18 @@ if __name__ == "__main__":
     TRIALS = 20
 
     # PPO Optimization
-    print("\n" + "=" * 50)
-    print("PPO Optimization")
-    study_ppo = make_study("ppo_alm_tuning")
-    study_ppo.optimize(objective_ppo, n_trials=TRIALS, show_progress_bar=True)
-    report_study(study_ppo, "PPO")
+    #print("\n" + "=" * 50)
+    #print("PPO Optimization")
+    #study_ppo = make_study("ppo_alm_tuning")
+    #study_ppo.optimize(objective_ppo, n_trials=TRIALS, show_progress_bar=True)
+    #report_study(study_ppo, "PPO")
 
     # A2C Optimization
-    #print("\n" + "=" * 50)
-    #print("A2C Optimization")
-    #study_a2c = make_study("a2c_alm_tuning")
-    #study_a2c.optimize(objective_a2c, n_trials=TRIALS, show_progress_bar=True)
-    #report_study(study_a2c, "A2C")
+    print("\n" + "=" * 50)
+    print("A2C Optimization")
+    study_a2c = make_study("a2c_alm_tuning")
+    study_a2c.optimize(objective_a2c, n_trials=TRIALS, show_progress_bar=True)
+    report_study(study_a2c, "A2C")
 
     # SAC Optimization
     #print("\n" + "=" * 50)

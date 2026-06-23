@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from stable_baselines3.common import results_plotter
-from environment.config import GAMMA, LAMBDA
+from environment.config import GAMMA, LAMBDA, INITIAL_CASH
 
 # ==========================================
 # PyTorch / DH Approach Functions
@@ -27,7 +27,7 @@ def bond_return_factor(tau_months: float, betas: torch.Tensor, lmbda: float = LA
     y = get_nelson_siegel_yield_batched(tau_months / 12.0, betas, lmbda)
     return 1.0 + y * (tau_months / 12.0)
 
-def build_state(shadow_cash, future_cash_tensor, betas_t, liability, CASH_SCALE=1000.0, BETA_SCALE=10.0):
+def build_state(shadow_cash, future_cash_tensor, betas_t, liability, CASH_SCALE=INITIAL_CASH, BETA_SCALE=10.0):
     """Constructs the normalized state tensor for the neural network."""
     return torch.cat([
         shadow_cash / CASH_SCALE,

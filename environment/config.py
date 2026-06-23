@@ -1,5 +1,7 @@
 import numpy as np
 
+VERSION = "2Y"
+
 LAMBDA = 0.1
 
 BETA0_GRID = np.array([0.05, 0.045, 0.04, 0.035, 0.03])
@@ -37,11 +39,26 @@ bond_configs = [
      'maturity_months': 12, 'coupon_dates': [6, 12]},
     {'bond_type': '24M_6Months', 'nominal_value': 100,
      'maturity_months': 24, 'coupon_dates': [6, 12, 18, 24]}
+] if VERSION == "2Y" else [
+    {'bond_type': '1M_Bill', 'nominal_value': 100,
+     'maturity_months': 1, 'coupon_dates': [1]},
+    {'bond_type': '3M_ZeroCoupon', 'nominal_value': 100,
+     'maturity_months': 3, 'coupon_dates': [3]},
+    {'bond_type': '6M_ZeroCoupon', 'nominal_value': 100,
+     'maturity_months': 6, 'coupon_dates': [6]},
+    {'bond_type': '12M_6Months', 'nominal_value': 100,
+     'maturity_months': 12, 'coupon_dates': [6, 12]},
+    {'bond_type': '60M_6Months', 'nominal_value': 100,
+     'maturity_months': 60, 'coupon_dates': [6, 12, 18, 24, 30, 36, 42, 48, 54, 60]},
+    {'bond_type': '120M_6Months', 'nominal_value': 100,
+     'maturity_months': 120, 'coupon_dates': [6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 
+                                              66, 72, 78, 84, 90, 96, 102, 108, 
+                                              114,120]},
 ]
 
-GAMMA = 0.001
-T = 24
-INITIAL_CASH = 2000.0
+GAMMA = 0.001 if VERSION == "2Y" else 0.0001
+T = 24 if VERSION == "2Y" else 120
+INITIAL_CASH = 2000.0 if VERSION == "2Y" else 10_000.0
 
 B1_0 = 0.0
 
@@ -134,8 +151,8 @@ R24_M = 1.0 + Y24M * 24.0 / 12.0
 
 
 
-ALPHA = 0.01*INITIAL_CASH
-BETA_DEPOSIT = 1*INITIAL_CASH
+ALPHA = 0.01*INITIAL_CASH if VERSION == "2Y" else 0.004167*INITIAL_CASH
+BETA_DEPOSIT = 1*INITIAL_CASH if VERSION == "2Y" else 0.2083*INITIAL_CASH
 
 L_ALL = ALPHA + BETA_DEPOSIT * Y1M       
 

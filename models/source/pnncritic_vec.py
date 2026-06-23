@@ -1,3 +1,13 @@
+"""
+hybrid_alm.py — Actor-Critic + Lagrangian CMDP (Dirichlet Policy)
+=================================================================
+Actor-Critic con GAE su CMDP.
+Reward per-step = penalita' (negative); il NAV terminale e' assegnato
+allo step di morte/orizzonte. Advantage stimato via GAE (bootstrapping
+sul critic V(s_t)); con gae_lambda=1 si ricade nel Monte Carlo puro.
+Termine di massimizzazione dell'entropia per favorire l'esplorazione.
+"""
+
 import math
 import numpy as np
 import torch
@@ -15,35 +25,7 @@ from models.utils import (
     build_state,
     cara_utility
 )
-class HybridActorGaussian(nn.Module):
-    def __init__(self, state_dim, action_dim, T, hidden_dim=64):
-        super().__init__()
-        self.T = T
-        self.trunk = nn.Sequential(
-            nn.Linear(state_dim + action_dim + 1, hidden_dim), nn.ELU(),
-            nn.Linear(hidden_dim, hidden_dim),                 nn.ELU(),
-        )
-        self.mean_head = nn.Linear(hidden_dim, action_dim)
-        self.log_std = nn.Parameter(torch.zeros(1, action_dim))
 
-    def forward(self, t, state, prev_action, deterministic=False):
-        batch_size = state.size(0)
-        t_norm = torch.full((batch_size, 1), t / self.T, device=state.device, dtype=torch.float32)
-        x = torch.cat([state, prev_action, t_norm], dim=-1)
-
-        mean = self.mean_head(self.trunk(x))
-        std = self.log_std.expand_as(mean).exp()
-        dist = torch.distributions.Normal(mean, std)
-
-        u = mean if deterministic else dist.rsample()
-
-        # log_prob ed entropia coerenti con u (l'azione grezza prodotta dalla policy)
-        log_prob = dist.log_prob(u).sum(dim=-1, keepdim=True)
-        entropy = dist.entropy().sum(dim=-1, keepdim=True)
-
-        # L'azione restituita sono i logit; il softmax avviene nel rollout (come nei baseline)
-        action = F_nn.softmax(u, dim=-1)   # mappa sul simplesso per la dinamica
-        return action, log_prob, entropy
 class HybridActor(nn.Module):
     """
     Dirichlet policy on the (K+1)-simplex.
@@ -68,48 +50,8 @@ class HybridActor(nn.Module):
         x = torch.cat([state, prev_action, t_norm], dim=-1)
         logits = self.action_head(self.trunk(x))
         
-        alphas = F_nn.softplus(logits) + 1.0e-3
-        dist = Dirichlet(alphas)
-
-        if deterministic:
-            action = alphas / alphas.sum(-1, keepdim=True) 
-        else:
-            action = dist.sample()
-
-        eps = 1e-8
-        safe_action = action + eps
-        safe_action = safe_action / safe_action.sum(dim=-1, keepdim=True)
-
-        log_prob = dist.log_prob(safe_action.detach())
-        entropy = dist.entropy()  # <-- Calcolo esplicito dell'entropia
-        
-        return action, log_prob, entropy
-
-        
-class HybridActorNoTimeNoPrevAction(nn.Module):
-    """
-    Dirichlet policy on the (K+1)-simplex.
-    ABLATION: Rimosso sia il tempo normalizzato (t_norm) sia l'azione precedente (prev_action).
-    L'agente prende decisioni basandosi ESCLUSIVAMENTE sullo stato corrente s_t.
-    """
-    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 64):
-        super().__init__()
-        # Trunk unico: solo state_dim. Rimossi il +1 (per il tempo) e action_dim (per prev_action).
-        self.trunk = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),  nn.ELU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.ELU(),
-        )
-        self.action_head = nn.Linear(hidden_dim, action_dim)
-
-    def forward(self, t: int, state: torch.Tensor, prev_action: torch.Tensor, deterministic: bool = False):
-        # NOTA: 't' e 'prev_action' vengono passati per compatibilità con il loop di rollout, 
-        # ma non vengono concatenati all'input.
-        
-        # Passiamo esclusivamente lo stato al trunk
-        logits = self.action_head(self.trunk(state))
-        
-        # Manteniamo il + 1e-3 coerente con le tue versioni ablation
-        alphas = F_nn.softplus(logits) + 1e-3
+        clamped_logits = torch.clamp(logits, max=20.0)   # nessun min: il +1.0 fa già da pavimento liscio
+        alphas = F_nn.softplus(clamped_logits) + 1.0
         dist = Dirichlet(alphas)
 
         if deterministic:
@@ -126,9 +68,7 @@ class HybridActorNoTimeNoPrevAction(nn.Module):
         
         return action, log_prob, entropy
 
-# ===========================================================================
-# Critic: baseline di stato V(s_t) (stato + tempo)
-# ===========================================================================
+
 class ValueCritic(nn.Module):
     """State-value baseline V(s_t). Predice il return Lagrangiano G_t."""
 
@@ -147,25 +87,7 @@ class ValueCritic(nn.Module):
         x = torch.cat([state, t_norm], dim=-1)
         return self.v_trunk(x)
 
-class ValueCriticNoTime(nn.Module):
-    """
-    State-value baseline V(s_t). Predice il Lagrangian Return futuro G_t.
-    ABLATION: Rimosso il tempo normalizzato (t_norm) come input.
-    """
-    def __init__(self, state_dim: int, hidden_dim: int = 64):
-        super().__init__()
-        self.v_trunk = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),  nn.ELU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.ELU(),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, t: int, state: torch.Tensor) -> torch.Tensor:
-        # t is passed for compatibility but not used
-        return self.v_trunk(state)
- 
 # Vectorized rollout
-
 def batched_cmdp_rollout(
     actor, critic, yields_batch, liabilities_batch, T, bond_maturities,
     bond_coupon_dates, bond_nominal: float = 100.0, initial_cash: float = 1000.0,
@@ -189,20 +111,70 @@ def batched_cmdp_rollout(
     log_probs_seq, penalties_seq, v_preds_seq, entropies_seq, is_alive_seq = [], [], [], [], []
     early_terminal_nav = torch.zeros(batch_size, 1, device=device)
     ever_bankrupt = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    
+    cpn_rate_np = np.array(
+        [len(bond_coupon_dates[k]) * 12.0 / bond_maturities[k] for k in range(K)],
+        dtype=np.float64,
+    )
+    coupon_count_np = np.zeros((K, max_M), dtype=np.float64)   # # coupons on slot m (inflows: slot = M-c)
+    face_count_np   = np.zeros((K, max_M), dtype=np.float64)   # face redeemed (slot 0)
+    hqla_coupon_np  = np.zeros((K, max_M), dtype=np.float64)   # next-month coupon (age_next = M-m in dates)
+    hqla_face_np    = np.zeros((K, max_M), dtype=np.float64)   # next-month face (slot 0)
+    coupon_unit_np  = np.zeros(K, dtype=np.float64)            # V * months_per_pmt / 12 (HQLA coupon size)
+
+    for k in range(K):
+        M = bond_maturities[k]
+        dates = bond_coupon_dates[k]
+        months_per_pmt = dates[0] if len(dates) == 1 else dates[1] - dates[0]
+        coupon_unit_np[k] = bond_nominal * (months_per_pmt / 12.0)
+        for m in range(max_M):
+            if m == 0:
+                face_count_np[k, m] = 1.0
+                hqla_face_np[k, m] = 1.0
+            for c in dates:
+                if (M - c) == m and 0 <= (M - c) < max_M:
+                    coupon_count_np[k, m] += 1.0   # += handles a coupon falling on slot 0 (maturity)
+            if (M - m) in dates:
+                hqla_coupon_np[k, m] = 1.0
+
+    cpn_rate_t     = torch.tensor(cpn_rate_np,     dtype=torch.float32, device=device)         # [K]
+    coupon_count_t = torch.tensor(coupon_count_np, dtype=torch.float32, device=device)         # [K, max_M]
+    face_count_t   = torch.tensor(face_count_np,   dtype=torch.float32, device=device)         # [K, max_M]
+    hqla_coupon_t  = torch.tensor(hqla_coupon_np,  dtype=torch.float32, device=device)         # [K, max_M]
+    hqla_face_t    = torch.tensor(hqla_face_np,    dtype=torch.float32, device=device)         # [K, max_M]
+    coupon_unit_t  = torch.tensor(coupon_unit_np,  dtype=torch.float32, device=device)         # [K]
+
+    # future_cf coupon scatter map: coupon on source slot s contributes to bucket
+    # m = s - (M - c). Precompute (src_slots, dst_buckets) index pairs per bond.
+    fcf_coupon_terms = []
+    for k in range(K):
+        M = bond_maturities[k]
+        src_list, dst_list = [], []
+        for m in range(max_M):
+            for c in bond_coupon_dates[k]:
+                s = m + (M - c)
+                if 0 <= s < max_M:
+                    src_list.append(s)
+                    dst_list.append(m)
+        if src_list:
+            fcf_coupon_terms.append((
+                torch.tensor(src_list, dtype=torch.long, device=device),
+                torch.tensor(dst_list, dtype=torch.long, device=device),
+            ))
+        else:
+            fcf_coupon_terms.append((None, None))
+    # ----------------------------------------------------------------------
 
     for t in range(T):
         betas_t = yields_batch[:, t]
         step_penalty = torch.zeros(batch_size, 1, device=device)
 
-        # Inflows
-        inflows = torch.zeros(batch_size, 1, device=device)
-        for k, M in enumerate(bond_maturities):
-            cpn_rate = len(bond_coupon_dates[k]) * 12.0 / M
-            inflows = inflows + holdings[:, k, 0:1] * bond_nominal
-            for c in bond_coupon_dates[k]:
-                slot_c = M - c
-                if 0 <= slot_c < max_M:
-                    inflows = inflows + holdings[:, k, slot_c:slot_c+1] * (bond_nominal * coupons[:, k, slot_c:slot_c+1] / cpn_rate)
+        # Inflows (vectorized): face at slot 0 + coupons at coupon slots
+        face_in = (holdings * face_count_t).sum(dim=(1, 2)) * bond_nominal              # [B]
+        coupon_in = (
+            holdings * coupons * coupon_count_t * (bond_nominal / cpn_rate_t).view(1, K, 1)
+        ).sum(dim=(1, 2))                                                                # [B]
+        inflows = (face_in + coupon_in).unsqueeze(-1)                                    # [B, 1]
 
         # Insolvency check (hard-termination)
         projected_cash = cash + inflows - liabilities_batch[:, t]
@@ -261,15 +233,14 @@ def batched_cmdp_rollout(
         investable = torch.relu(cash) * is_alive.float()
 
         # State building + step Actor/Critic
-        future_cf = torch.zeros(batch_size, max_M, device=device)
-        for k, M in enumerate(bond_maturities):
-            cpn_rate = len(bond_coupon_dates[k]) * 12.0 / M
-            for m in range(max_M):
-                future_cf[:, m] += holdings[:, k, m] * bond_nominal
-                for c in bond_coupon_dates[k]:
-                    s = m + (M - c)
-                    if 0 <= s < max_M:
-                        future_cf[:, m] += holdings[:, k, s] * (bond_nominal * coupons[:, k, s] / cpn_rate)
+        # future_cf (vectorized): face per bucket + scattered coupons
+        future_cf = (holdings * bond_nominal).sum(dim=1)                                 # [B, max_M]
+        for k in range(K):
+            src_idx, dst_idx = fcf_coupon_terms[k]
+            if src_idx is None:
+                continue
+            cf_src = holdings[:, k, :] * coupons[:, k, :] * (bond_nominal / cpn_rate_t[k])   # [B, max_M]
+            future_cf.index_add_(1, dst_idx, cf_src[:, src_idx])
 
         state = build_state(
             cash,
@@ -295,17 +266,12 @@ def batched_cmdp_rollout(
         cash = cash - (investable - (weights[:, K:K+1] * investable))
         holdings, coupons, prev_action = new_holdings, new_coupons, weights
 
-        # LCR check: HQLA = cash + inflows (coupons and/or face value) arriving NEXT month, discounted at 1M
-        hqla = cash.clone()
-        for k, M in enumerate(bond_maturities):
-            dates = bond_coupon_dates[k]
-            months_per_pmt = dates[0] if len(dates) == 1 else dates[1] - dates[0]
-            for m in range(max_M):
-                age_next = M - m  # age the lot in slot m will have next month
-                coupon_next = (coupons[:, k, m:m+1] * bond_nominal * (months_per_pmt / 12.0)) if age_next in dates else 0.0
-                face_next = bond_nominal if m == 0 else 0.0
-                inflow_next = face_next + coupon_next
-                hqla += (holdings[:, k, m:m+1] * inflow_next) / debt_interest.view(-1, 1)
+        # LCR check (vectorized): HQLA = cash + next-month face + next-month coupons, discounted at 1M
+        face_next = (holdings * hqla_face_t).sum(dim=(1, 2)) * bond_nominal               # [B]
+        coupon_next = (
+            holdings * coupons * hqla_coupon_t * coupon_unit_t.view(1, K, 1)
+        ).sum(dim=(1, 2))                                                                  # [B]
+        hqla = cash + ((face_next + coupon_next).unsqueeze(-1) / debt_interest.view(-1, 1))
 
         lcr = hqla / (liabilities_batch[:, t + 1].view(-1, 1) + 1e-8)
         
@@ -356,7 +322,7 @@ def batched_cmdp_rollout(
 
     pv_liabs_term = torch.zeros(batch_size, 1, device=device)
     L_total = liabilities_batch.shape[1]
-    for j in range(L_total - (T + 1)):
+    for j in range(max_M - 1):
         idx = T + 1 + j
         if idx >= L_total:
             break
@@ -394,7 +360,7 @@ def train_cmdp_alm(
     log_every: int = 10, device: str = "cpu", critic_warmup: int = 0,
     penalty_limit: float = 0.0, lmbda: float = 5.0,
     ent_coef_init: float = 0.01, ent_coef_final: float = 0.01,
-    gamma: float = 1.0, gae_lambda: float = 0.95,
+    gamma: float = 1.0, gae_lambda: float = 0.95, train_seed_offset: int = 0
 ):
     T = markov_config["T"]
     bond_maturities = [int(cfg["maturity_months"]) for cfg in markov_config["bond_configs"]]
@@ -422,7 +388,7 @@ def train_cmdp_alm(
 
         y_list, l_list = [], []
         for i in range(batch_size):
-            seed = epoch * batch_size + i
+            seed = train_seed_offset + epoch * batch_size + i
             y_path = MarkovYieldCurveGenerator.generate(T * 2, seed=seed, pure_grid=True, **safe_config)
             l_path = DepositBetaLiabilityGenerator.generate(y_path, noise_std=0.0, seed=seed)
             l_path[T + 1:] = 0.0
